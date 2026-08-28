@@ -43,7 +43,7 @@ BOOTSTRAP_CLIENT_SECRET = os.getenv("SM_IAM_BOOTSTRAP_CLIENT_SECRET", "")
 INTEGRATION_DEPENDENCIES = ['sm-audit-log-center']
 INTEGRATION_EVENTS = ["health.checked", "resource.changed", "audit.recorded", "token.issued"]
 _db_conn: sqlite3.Connection | None = None
-_db_lock = threading.Lock()
+_db_lock = threading.RLock()
 
 
 def db() -> sqlite3.Connection:
