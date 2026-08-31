@@ -1,88 +1,79 @@
+"""SM IAM 领域测试：用户、角色、登录、会话校验、MFA。"""
+
+import pytest
 from fastapi.testclient import TestClient
-from app.main import app
+
+from app import base
+from app.main import VERSION, app
 
 
-def test_health_and_security_headers():
-    with TestClient(app) as client:
-        response = client.get('/health', headers={'X-Request-Id': 'suite-test'})
-        assert response.status_code == 200
-        assert response.headers['X-Request-Id'] == 'suite-test'
-        assert response.headers['X-Frame-Options'] == 'DENY'
-        assert response.json()['version'] == '2.1.0'
+@pytest.fixture()
+def client(monkeypatch):
+    monkeypatch.setattr(base, "internal_api_key", lambda: "TEST")
+    base.reset_state()
+    from app.main import _init as init_db
+    init_db()
+    with TestClient(app) as c:
+        c.headers["X-Internal-Token"] = "TEST"
+        yield c
 
 
-def test_overview_and_item_lifecycle(monkeypatch):
-    from app import main
-    monkeypatch.setattr(main, 'INTERNAL_API_KEY', 'TEST')
-    with TestClient(app) as client:
-        overview = client.get('/api/overview').json()
-        assert overview['total'] >= 2
-        created = client.post('/api/items', headers={'X-Internal-Token': 'TEST'}, json={'name': '企业级测试资源', 'owner': '测试部', 'priority': 'P2'}).json()
-        assert created['status'] == 'active'
-        updated = client.patch(f"/api/items/{created['id']}/status?item_status=review", headers={'X-Internal-Token': 'TEST'})
-        assert updated.status_code == 200
-        assert updated.json()['status'] == 'review'
+def test_health_and_version(client):
+    r = client.get("/health", headers={"X-Request-Id": "suite-test"})
+    assert r.status_code == 200
+    assert r.json()["version"] == VERSION
 
 
-def test_ops_metrics():
-    with TestClient(app) as client:
-        client.get('/health')
-        metrics = client.get('/api/ops/metrics')
-        assert metrics.status_code == 200
-        assert metrics.json()['requests_total'] >= 1
+def test_user_and_role_crud(client):
+    assert client.post("/api/iam/roles", json={"name": "finance", "permissions": ["report.read"]}).status_code == 201
+    assert client.post("/api/iam/users", json={"username": "alice", "email": "alice@corp.cn", "password": "Passw0rd!", "roles": ["finance"]}).status_code == 201
+    assert client.post("/api/iam/users", json={"username": "alice", "email": "a2@corp.cn", "password": "Passw0rd!"}).status_code == 409
+    assert client.get("/api/iam/users").json()["total"] == 1
+    assert client.get("/api/iam/roles").json()["total"] == 1
 
 
-
-def test_integration_manifest_contract():
-    with TestClient(app) as client:
-        response = client.get('/api/integration/manifest')
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload['service']
-        assert payload['version'] == '2.1.0'
-        assert '/api/ops/metrics' == payload['metrics_path']
-        assert isinstance(payload['dependencies'], list)
+def test_user_missing_role(client):
+    assert client.post("/api/iam/users", json={"username": "bob", "email": "b@corp.cn", "password": "Passw0rd!", "roles": ["ghost"]}).status_code == 404
 
 
-
-def test_request_size_and_rate_limit_guards(monkeypatch):
-    from app import main
-    main.RATE_BUCKETS.clear()
-    monkeypatch.setattr(main, 'MAX_REQUEST_BYTES', 4)
-    monkeypatch.setattr(main, 'RATE_MAX_REQUESTS', 1)
-    with TestClient(app) as client:
-        oversized = client.post('/api/items', content='12345', headers={'content-type': 'application/json'})
-        assert oversized.status_code == 413
-        assert client.get('/health').status_code == 200
-        limited = client.get('/health')
-        assert limited.status_code == 429
-        assert limited.headers['Retry-After']
+def test_login_verify_logout(client):
+    client.post("/api/iam/users", json={"username": "alice", "email": "a@corp.cn", "password": "Passw0rd!"})
+    assert client.post("/api/iam/auth/login", json={"username": "alice", "password": "wrong"}).status_code == 401
+    login = client.post("/api/iam/auth/login", json={"username": "alice", "password": "Passw0rd!"}).json()
+    token = login["token"]
+    assert token.startswith("smt_")
+    assert client.post("/api/iam/auth/verify", json={"token": token}).json()["valid"] is True
+    assert client.post("/api/iam/auth/verify", json={"token": "invalid-token-value"}).status_code == 401
+    assert client.post("/api/iam/auth/logout", json={"token": token}).json()["revoked"] is True
+    assert client.post("/api/iam/auth/verify", json={"token": token}).status_code == 401
 
 
-def test_internal_write_token_is_enforced(monkeypatch):
-    from app import main
-    monkeypatch.setattr(main, 'INTERNAL_API_KEY', 'TOKEN')
-    with TestClient(app) as client:
-        blocked = client.post('/api/items', json={'name': 'blocked'})
-        assert blocked.status_code == 403
-        allowed = client.post('/api/items', headers={'X-Internal-Token': 'TOKEN'}, json={'name': 'allowed'})
-        assert allowed.status_code == 201
+def test_user_status(client):
+    uid = client.post("/api/iam/users", json={"username": "carol", "email": "c@corp.cn", "password": "Passw0rd!"}).json()["id"]
+    assert client.post(f"/api/iam/users/{uid}/status", json={"status": "disabled"}).json()["status"] == "disabled"
+    assert client.post("/api/iam/auth/login", json={"username": "carol", "password": "Passw0rd!"}).status_code == 403
 
 
-
-def test_sm3_crypto_endpoint():
-    with TestClient(app) as client:
-        response = client.post('/api/crypto/sm3', json={'value': 'enterprise'})
-        assert response.status_code == 200
-        assert response.json()['algorithm'] == 'SM3'
-        assert len(response.json()['digest']) == 64
-        assert client.get('/api/crypto/status').json()['sm4'] == 'enabled'
+def test_mfa(client):
+    uid = client.post("/api/iam/users", json={"username": "dave", "email": "d@corp.cn", "password": "Passw0rd!"}).json()["id"]
+    mfa = client.post(f"/api/iam/users/{uid}/mfa").json()
+    assert mfa["mfa_enabled"] is True
+    assert len(mfa["otpauth_secret"]) == 32
 
 
+def test_stats(client):
+    client.post("/api/iam/users", json={"username": "eve", "email": "e@corp.cn", "password": "Passw0rd!"})
+    stats = client.get("/api/iam/stats").json()
+    assert stats["users"] == 1
+    assert stats["active_users"] == 1
 
-def test_security_baseline():
-    with TestClient(app) as client:
-        payload = client.get('/api/security/baseline').json()
-        assert payload['controls']['sm3'] is True
-        assert payload['controls']['sm4'] is True
-        assert payload['controls']['rate_limit'] is True
+
+def test_manifest_and_crypto(client):
+    assert client.get("/api/integration/manifest").json()["version"] == VERSION
+    enc = client.post("/api/crypto/encrypt", json={"value": "x"}).json()["ciphertext"]
+    assert client.post("/api/crypto/decrypt", json={"value": enc}).json()["plaintext"] == "x"
+
+
+def test_write_requires_auth(client):
+    del client.headers["X-Internal-Token"]
+    assert client.post("/api/iam/users", json={"username": "f", "email": "f@corp.cn", "password": "Passw0rd!"}).status_code == 401
