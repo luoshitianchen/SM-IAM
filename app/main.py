@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from app import base
 
 SERVICE = "sm-iam"
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 NAME = "SM IAM"
 DESCRIPTION = "统一身份认证：用户、角色、RBAC、会话令牌与多因素认证"
 PORT = 8300
