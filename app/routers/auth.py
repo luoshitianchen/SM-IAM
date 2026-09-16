@@ -4,36 +4,19 @@ from __future__ import annotations
 import json
 import secrets
 import time
-from datetime import UTC, datetime
+import uuid
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from sqlalchemy import String, Text, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.config import settings
 from app.core.database import get_session
 from app.core.security import sign_jwt, sm3_hex, verify_jwt
-from app.models.base import Base
+from app.models.iam_client import IAMClient
+from app.models.iam_user import IAMUser
 
 router = APIRouter(tags=["auth"])
-
-
-class IAMUser(Base):
-    __tablename__ = "iam_users"
-    username: Mapped[str] = mapped_column(String(128), primary_key=True)
-    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
-    display_name: Mapped[str] = mapped_column(String(128), default="")
-    roles: Mapped[str] = mapped_column(Text, default="[]")
-    created_at: Mapped[str] = mapped_column(String(64), default="")
-
-
-class IAMClient(Base):
-    __tablename__ = "iam_clients"
-    client_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    client_secret_hash: Mapped[str] = mapped_column(String(256), nullable=False)
-    scopes: Mapped[str] = mapped_column(Text, default="[]")
-    created_at: Mapped[str] = mapped_column(String(64), default="")
 
 
 async def _ensure_seed(session: AsyncSession) -> None:
@@ -41,9 +24,10 @@ async def _ensure_seed(session: AsyncSession) -> None:
     if not result.scalar_one_or_none():
         password = settings.IAM_BOOTSTRAP_PASSWORD or "ChangeMe123!"
         session.add(IAMUser(
+            id=str(uuid.uuid4()),
             username=settings.IAM_BOOTSTRAP_USER, password_hash=sm3_hex(password),
             display_name="系统管理员", roles=json.dumps(["admin"], ensure_ascii=False),
-            created_at=datetime.now(UTC).isoformat(),
+            status="active",
         ))
     result = await session.execute(select(IAMClient).limit(1))
     if not result.scalar_one_or_none():
@@ -51,8 +35,9 @@ async def _ensure_seed(session: AsyncSession) -> None:
         session.add(IAMClient(
             client_id=settings.IAM_BOOTSTRAP_CLIENT_ID,
             client_secret_hash=sm3_hex(client_secret),
+            name="系统内置客户端",
             scopes=json.dumps(["openid", "profile", "roles"], ensure_ascii=False),
-            created_at=datetime.now(UTC).isoformat(),
+            status="active",
         ))
     await session.commit()
 
@@ -68,13 +53,17 @@ async def oauth_token(
     if grant_type == "client_credentials":
         result = await session.execute(select(IAMClient).where(IAMClient.client_id == client_id))
         client = result.scalar_one_or_none()
-        if not client or not secrets.compare_digest(client.client_secret_hash, sm3_hex(client_secret)):
+        if not client or client.status != "active":
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "客户端不存在或已禁用")
+        if not secrets.compare_digest(client.client_secret_hash, sm3_hex(client_secret)):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "客户端凭据无效")
         subject, roles, scopes = f"client:{client_id}", ["client"], json.loads(client.scopes or "[]")
     elif grant_type == "password":
         result = await session.execute(select(IAMUser).where(IAMUser.username == username))
         user = result.scalar_one_or_none()
-        if not user or not secrets.compare_digest(user.password_hash, sm3_hex(password)):
+        if not user or user.status != "active":
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户不存在或已禁用")
+        if not secrets.compare_digest(user.password_hash, sm3_hex(password)):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
         subject, roles = username, json.loads(user.roles or "[]")
         scopes = ["openid", "profile", "roles"]

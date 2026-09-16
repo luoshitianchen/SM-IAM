@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -12,7 +13,9 @@ from app.core.database import init_db
 from app.core.logging import setup_logging
 from app.core.middleware import SecurityMiddleware
 from app.routers import auth as auth_router
-from app.routers import crypto, health, items, meta, metrics
+from app.routers import crypto, health, iam_clients, iam_permissions, iam_roles, iam_users, items, meta, metrics
+
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 setup_logging()
 
@@ -44,10 +47,13 @@ app.include_router(crypto.router)
 app.include_router(items.router)
 app.include_router(metrics.router)
 app.include_router(auth_router.router)
-
+app.include_router(iam_users.router)
+app.include_router(iam_roles.router)
+app.include_router(iam_permissions.router)
+app.include_router(iam_clients.router)
 
 
 @app.get("/", include_in_schema=False)
 def console() -> FileResponse:
     """控制台静态页面。"""
-    return FileResponse("app/static/index.html")
+    return FileResponse(_STATIC_DIR / "index.html")
