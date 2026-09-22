@@ -1,0 +1,18 @@
+# SM-IAM PodChaos 故障注入实验 - 仅允许在 sm-staging 命名空间演练
+# 生产环境严禁启用；演练前需经值班负责人确认并通知相关方
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: sm-iam-pod-kill
+  namespace: sm-staging
+spec:
+  action: pod-kill
+  mode: one
+  gracePeriod: 0
+  selector:
+    namespaces:
+      - sm-staging
+    labelSelectors:
+      app.kubernetes.io/name: sm-iam
+  scheduler:
+    cron: '@every 30s'

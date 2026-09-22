@@ -1,0 +1,13 @@
+# SM-IAM Helm Chart 定义
+apiVersion: v2
+name: sm-iam
+description: SM-IAM 微服务 Helm Chart - 企业级部署资产
+type: application
+version: 1.0.0
+appVersion: "2.1.0"
+keywords:
+  - sm-microservices
+  - enterprise
+  - sm-iam
+maintainers:
+  - name: sm-platform-team
